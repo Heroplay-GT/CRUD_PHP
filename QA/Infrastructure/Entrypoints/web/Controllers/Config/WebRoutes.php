@@ -23,6 +23,8 @@ final class WebRoutes
             'auth.logout' => ['GET', 'UserController@logout'],
             'auth.forgot' => ['GET', 'UserController@forgotForm'],
             'auth.forgot.send' => ['POST', 'UserController@sendForgot'],
+            'auth.reset' => ['GET', 'UserController@resetForm'],
+            'auth.reset.update' => ['POST', 'UserController@resetUpdate'],
 
             'users.index' => ['GET', 'UserController@index'],
             'users.create' => ['GET', 'UserController@createForm'],
@@ -70,6 +72,8 @@ final class WebRoutes
             'auth.logout',
             'auth.forgot',
             'auth.forgot.send',
+            'auth.reset',
+            'auth.reset.update',
         ];
     }
 }

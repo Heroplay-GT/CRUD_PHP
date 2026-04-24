@@ -37,6 +37,7 @@ use InvalidArgumentException;
 final class UserController
 {
     private const SESSION_AUTH = 'auth';
+    private const PASSWORD_RESET_SESSION = 'password_reset';
 
     public function __construct(
         private readonly View $view,
@@ -161,12 +162,19 @@ final class UserController
             $this->view->redirectToRoute('auth.forgot');
         }
 
-        $temp = bin2hex(random_bytes(5));
-        $updated = $user->changePassword(UserPassword::fromPlainText($temp));
-        $this->updateUserPort->update($updated);
+        $token = bin2hex(random_bytes(16));
+        if (!isset($_SESSION[self::PASSWORD_RESET_SESSION]) || !is_array($_SESSION[self::PASSWORD_RESET_SESSION])) {
+            $_SESSION[self::PASSWORD_RESET_SESSION] = [];
+        }
+        $_SESSION[self::PASSWORD_RESET_SESSION][$token] = [
+            'email' => $emailRaw,
+            'expires' => time() + 30 * 60,
+        ];
+
+        $resetUrl = $this->buildResetUrl($token);
 
         $body = $this->view->render('emails/forgot-password', [
-            'temporaryPassword' => $temp,
+            'resetUrl' => $resetUrl,
             'userName' => $user->name()->value(),
         ]);
 
@@ -175,14 +183,120 @@ final class UserController
             'Content-type: text/html; charset=UTF-8',
             'From: QA Demo <noreply@localhost>',
         ]);
-        @mail($emailRaw, 'Contraseña temporal (QA demo)', $body, $headers);
+        @mail($emailRaw, 'Restablecer contraseña (QA demo)', $body, $headers);
 
-        Flash::setSuccess(
-            'Se generó una contraseña nueva para tu cuenta. '
-            . 'En local el correo casi nunca llega (revisa MailHog si lo usas). '
-            . 'Contraseña temporal para entrar ahora: ' . $temp
-        );
+        Flash::setSuccess('Si el correo está registrado, recibirás un enlace para restablecer la contraseña.');
         $this->view->redirectToRoute('auth.forgot');
+    }
+
+    public function resetForm(): void
+    {
+        $token = trim((string) ($_GET['token'] ?? ''));
+        $data = $this->getResetTokenData($token);
+        if ($data === null) {
+            Flash::setMessage('El enlace de restablecimiento no es válido o expiró.');
+            $this->view->redirectToRoute('auth.forgot');
+        }
+
+        $errors = Flash::errors();
+        $old = Flash::old();
+        echo $this->view->render('layouts/page', [
+            'title' => 'Restablecer contraseña',
+            'content' => $this->view->render('auth/reset-password', [
+                'title' => 'Restablecer contraseña',
+                'errors' => $errors,
+                'old' => $old,
+                'token' => $token,
+                'email' => $data['email'],
+            ]),
+        ]);
+    }
+
+    public function resetUpdate(): void
+    {
+        $token = trim((string) ($_POST['token'] ?? ''));
+        $data = $this->getResetTokenData($token);
+        if ($data === null) {
+            Flash::setMessage('El enlace de restablecimiento no es válido o expiró.');
+            $this->view->redirectToRoute('auth.forgot');
+        }
+
+        $password = trim((string) ($_POST['password'] ?? ''));
+        $confirm = trim((string) ($_POST['password_confirm'] ?? ''));
+        $errors = [];
+
+        if ($password === '') {
+            $errors['password'] = 'La contraseña es obligatoria.';
+        }
+        if ($confirm === '') {
+            $errors['password_confirm'] = 'La confirmación es obligatoria.';
+        }
+        if ($password !== '' && $confirm !== '' && $password !== $confirm) {
+            $errors['password_confirm'] = 'Las contraseñas no coinciden.';
+        }
+
+        if ($errors !== []) {
+            Flash::setErrors($errors);
+            Flash::setOld(['email' => $data['email']]);
+            Flash::setMessage('Corrige los errores del formulario.');
+            $this->view->redirectToRoute('auth.reset', ['token' => $token]);
+        }
+
+        try {
+            $email = new UserEmail($data['email']);
+            $user = $this->getUserByEmailPort->getByEmail($email);
+            if ($user === null) {
+                Flash::setMessage('No se encontró el usuario para este enlace.');
+                $this->view->redirectToRoute('auth.forgot');
+            }
+
+            $updated = $user->changePassword(UserPassword::fromPlainText($password));
+            $this->updateUserPort->update($updated);
+        } catch (InvalidArgumentException $e) {
+            Flash::setErrors(['password' => $e->getMessage()]);
+            Flash::setMessage('Corrige los errores del formulario.');
+            $this->view->redirectToRoute('auth.reset', ['token' => $token]);
+        }
+
+        unset($_SESSION[self::PASSWORD_RESET_SESSION][$token]);
+        Flash::setSuccess('Tu contraseña se actualizó. Ya puedes iniciar sesión.');
+        $this->view->redirectToRoute('auth.login');
+    }
+
+    private function getResetTokenData(string $token): ?array
+    {
+        if ($token === '') {
+            return null;
+        }
+        if (!isset($_SESSION[self::PASSWORD_RESET_SESSION]) || !is_array($_SESSION[self::PASSWORD_RESET_SESSION])) {
+            return null;
+        }
+
+        $data = $_SESSION[self::PASSWORD_RESET_SESSION][$token] ?? null;
+        if (!is_array($data)) {
+            return null;
+        }
+
+        $expires = (int) ($data['expires'] ?? 0);
+        if ($expires < time()) {
+            unset($_SESSION[self::PASSWORD_RESET_SESSION][$token]);
+            return null;
+        }
+
+        $email = (string) ($data['email'] ?? '');
+        if ($email === '') {
+            return null;
+        }
+
+        return ['email' => $email, 'expires' => $expires];
+    }
+
+    private function buildResetUrl(string $token): string
+    {
+        $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        $host = $_SERVER['HTTP_HOST'] ?? 'localhost:8000';
+
+        return $scheme . '://' . $host . '/index.php?route=auth.reset&token=' . urlencode($token);
     }
 
     public function index(): void
